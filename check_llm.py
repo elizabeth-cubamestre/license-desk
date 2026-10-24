@@ -3,7 +3,7 @@ import os
 from dotenv import load_dotenv
 from openai import OpenAI
 load_dotenv()
-c = OpenAI(base_url=os.environ["LLM_BASE_URL"], api_key=os.environ["LLM_API_KEY"])
+c = OpenAI(base_url=os.environ["LLM_BASE_URL"], api_key=os.environ["LLM_API_KEY"], timeout=20, max_retries=0)
 try:
     names = [m.id for m in c.models.list()]
     print("Models available to your key:\n ", "\n  ".join(names))

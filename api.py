@@ -1,5 +1,5 @@
 """HTTP API. Run: uvicorn api:app --reload   Docs: http://localhost:8000/docs"""
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import core
@@ -33,3 +33,16 @@ def verify(b: TokenIn): return core.verify(b.receipt)
 def paid(cancelled: int = 0):
     msg = "Payment cancelled." if cancelled else "Payment approved. You can close this tab; the agent will finish the purchase."
     return f"<body style='font:20px system-ui;padding:3rem'>{msg}</body>"
+
+class ScanIn(BaseModel): artwork_id: str
+class InvoiceIn(BaseModel): recipient_email: str
+
+@app.post("/artworks/{aid}/image")
+async def upload_reference(aid: str, image: UploadFile = File(...)):
+    guard(core.save_reference, aid, image.content_type, await image.read()); return {"ok": True}
+@app.post("/sentinel/scan")
+def sentinel_scan(b: ScanIn): return guard(core.scan, b.artwork_id)
+@app.get("/findings")
+def findings(): return core.list_findings()
+@app.post("/findings/{fid}/invoice")
+def invoice(fid: int, b: InvoiceIn): return guard(core.invoice_finding, fid, b.recipient_email)

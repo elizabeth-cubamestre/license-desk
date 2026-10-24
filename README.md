@@ -25,3 +25,9 @@ Licensing for artists in the age of AI. Artists list work with terms; AI agents 
 Sentinel (web detection with Tavily + vision model, converting confirmed copies into retroactive license invoices), PayPal webhooks, AG Grid artist dashboard, OpenAPI-generated SDK.
 
 License: MIT
+
+## Sentinel (detect, then monetize)
+1. Upload a reference image: `curl -F image=@art.png localhost:8000/artworks/art-001/image`
+2. Scan: `curl -X POST localhost:8000/sentinel/scan -H 'content-type: application/json' -d '{"artwork_id":"art-001"}'`
+   Uses Tavily (cached, capped by `MAX_SEARCHES_PER_SCAN`) and a vision model to verify matches. Style imitation is never flagged as copying.
+3. Invoice a confirmed copy: `curl -X POST localhost:8000/findings/1/invoice -H 'content-type: application/json' -d '{"recipient_email":"<sandbox personal email>"}'`

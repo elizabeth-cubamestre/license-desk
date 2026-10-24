@@ -58,7 +58,7 @@ def quote(artwork_id, intent):
     if os.environ.get("LLM_API_KEY"):
         try:
             from openai import OpenAI
-            r = OpenAI(base_url=os.environ["LLM_BASE_URL"], api_key=os.environ["LLM_API_KEY"], timeout=20, max_retries=0).chat.completions.create(
+            r = OpenAI(base_url=os.environ["LLM_BASE_URL"], api_key=os.environ["LLM_API_KEY"], timeout=float(os.environ.get("LLM_TIMEOUT", "45")), max_retries=1).chat.completions.create(
                 model=os.environ.get("LLM_MODEL", "gemini-2.5-flash"), temperature=0,
                 messages=[{"role": "system", "content": "You are an artist's licensing agent. Reply with JSON only: "
                            '{"tier": one of personal|editorial|commercial|ai_training, "months": integer 1-60, '

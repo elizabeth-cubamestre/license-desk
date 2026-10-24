@@ -58,7 +58,7 @@ def quote(artwork_id, intent):
     if os.environ.get("LLM_API_KEY"):
         try:
             from openai import OpenAI
-            r = OpenAI(base_url=os.environ["LLM_BASE_URL"], api_key=os.environ["LLM_API_KEY"]).chat.completions.create(
+            r = OpenAI(base_url=os.environ["LLM_BASE_URL"], api_key=os.environ["LLM_API_KEY"], timeout=20, max_retries=0).chat.completions.create(
                 model=os.environ.get("LLM_MODEL", "gemini-2.5-flash"), temperature=0,
                 messages=[{"role": "system", "content": "You are an artist's licensing agent. Reply with JSON only: "
                            '{"tier": one of personal|editorial|commercial|ai_training, "months": integer 1-60, '
@@ -68,7 +68,7 @@ def quote(artwork_id, intent):
             txt = r.choices[0].message.content
             choice = json.loads(txt[txt.index("{"): txt.rindex("}") + 1])
         except Exception as e:
-            choice["rationale"] += f" (LLM failed: {type(e).__name__})"
+            choice["rationale"] += f" (LLM failed: {type(e).__name__}: {str(e)[:200]})"
     tier = choice.get("tier") if choice.get("tier") in TIERS else "commercial"
     months = max(1, min(60, int(choice.get("months", 6))))
     return {"artwork_id": artwork_id, "title": art["title"], "tier": tier, "months": months,

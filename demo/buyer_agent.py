@@ -7,7 +7,7 @@ p.add_argument("intent"); p.add_argument("--budget", type=float, required=True)
 p.add_argument("--artwork", default="art-001")
 a = p.parse_args()
 API = os.environ.get("API_URL", "http://localhost:8000")
-c = httpx.Client(base_url=API, timeout=60)
+c = httpx.Client(base_url=API, timeout=120)
 
 q = c.post("/quote", json={"artwork_id": a.artwork, "intent": a.intent}).json()
 print(f"Quote: {q['tier']} license, {q['months']} months = ${q['amount']:.2f}\n  why: {q['rationale']}")

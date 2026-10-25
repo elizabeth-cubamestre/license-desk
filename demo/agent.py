@@ -18,7 +18,7 @@ SYSTEM = f"""You are a purchasing agent that licenses artwork for a client. Budg
 Steps: search_licenses (a few keywords; leave the query empty to list everything) to find suitable work; get_quote with the client's plain-language use; if the price fits the budget,
 purchase_license with exactly the quoted artwork_id, tier and months; then complete_purchase with the order_id (a human
 approves the payment in PayPal, the tool waits); then verify_receipt. If a work is refused or too expensive, try another
-or stop and explain. Never exceed the budget. Finish with a short plain-English summary of what you did and paid."""
+or stop and explain. Never exceed the budget. Never ask the human to confirm anything: call complete_purchase immediately after purchase_license, because that tool waits for the PayPal approval by itself. Finish with a short plain-English summary of what you did and paid."""
 
 def text(res): return "\n".join(c.text for c in res.content if hasattr(c, "text"))
 
@@ -35,6 +35,7 @@ async def main():
         tools = [{"type": "function", "function": {"name": t.name, "description": t.description or "", "parameters": t.inputSchema}}
                  for t in (await s.list_tools()).tools]
         quotes, refused, searched = {}, set(), set()
+        st = {"pending": None, "verified": False}
 
         async def call(name, args):
             if name == "search_licenses":
@@ -53,21 +54,34 @@ async def main():
                     await asyncio.sleep(3)
                 return "Timed out waiting for the human to approve payment."
             out = text(await s.call_tool(name, args))
+            if name == "verify_receipt": st["verified"] = True
             try:
                 d = json.loads(out)
                 if name == "get_quote":
                     k = (d["artwork_id"], d["tier"], d["months"])
                     (refused.add(k) if d.get("refused") else quotes.__setitem__(k, d["amount"]))
                 if name == "purchase_license":
+                    st["pending"] = d["order_id"]
                     print(f"\n  >> HUMAN APPROVAL NEEDED. Opening PayPal sandbox:\n     {d['approve_url']}\n"); webbrowser.open(d["approve_url"])
             except Exception: pass
             return out
 
         msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": a.task}]
+        nudges = empties = 0
         for _ in range(a.max_steps):
             m = chat(msgs, tools)
             if not m.tool_calls:
-                print("\nAGENT SUMMARY:", m.content); return
+                if not (m.content or "").strip() and empties < 2:  # model said nothing: ask for a plain-English wrap-up
+                    empties += 1
+                    msgs += [{"role": "assistant", "content": "(no message)"},
+                             {"role": "user", "content": "Please write a short plain-English summary for the client: what you found, what you did, whether you bought anything, and why or why not."}]
+                    continue
+                if st["pending"] and not st["verified"] and nudges < 3:  # model stopped early: push it to finish the purchase
+                    nudges += 1
+                    msgs += [{"role": "assistant", "content": m.content or ""},
+                             {"role": "user", "content": f"Do not wait for me. Call complete_purchase now with order_id {st['pending']}; the tool itself waits for the human to approve in PayPal. Then call verify_receipt with the receipt."}]
+                    continue
+                print("\nAGENT SUMMARY:", (m.content or "").strip() or "(The agent gave no summary.)"); return
             msgs.append({"role": "assistant", "content": m.content or "", "tool_calls": [t.model_dump(exclude_none=True) for t in m.tool_calls]})
             for t in m.tool_calls:
                 args = json.loads(t.function.arguments or "{}")

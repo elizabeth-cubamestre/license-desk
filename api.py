@@ -53,6 +53,16 @@ def reference_image(aid: str):
     if not r: raise HTTPException(404, "no reference image")
     return Response(r["data"], media_type=r["mime"])
 
+@app.get("/findings/{fid}/image")
+def finding_image(fid: int):
+    with core.db() as c: r = c.execute("SELECT * FROM refs WHERE artwork_id=?", (f"finding-{fid}",)).fetchone()
+    if not r: raise HTTPException(404, "no image")
+    return Response(r["data"], media_type=r["mime"])
+
+@app.post("/sentinel/check")
+async def sentinel_check(artwork_id: str = Form(...), image: UploadFile = File(...)):
+    return guard(core.check_image, artwork_id, image.content_type, await image.read())
+
 @app.get("/findings/{fid}/report", response_class=HTMLResponse)
 def report(fid: int):
     import html, time

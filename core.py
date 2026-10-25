@@ -180,15 +180,20 @@ def _tavily(query):
     with db() as c: c.execute("INSERT OR REPLACE INTO cache VALUES(?,?)", (query, json.dumps(out)))
     return out
 
-def dhash(data):
+def dhash(data, flip=False):
     """64-bit perceptual hash: survives resizing, recompression and mild edits. Runs locally, no API quota."""
     import io
     from PIL import Image
-    px = list(Image.open(io.BytesIO(data)).convert("L").resize((9, 8)).getdata())
+    im = Image.open(io.BytesIO(data)).convert("L")
+    if flip: im = im.transpose(Image.Transpose.FLIP_LEFT_RIGHT)  # catches mirrored copies
+    px = list(im.resize((9, 8)).getdata())
     bits = 0
     for r in range(8):
         for c in range(8): bits = (bits << 1) | (px[r * 9 + c] > px[r * 9 + c + 1])
     return f"{bits:016x}"
+
+def _score(d): return max(0, round(100 * (1 - d / 32)))  # distance ~32 is what unrelated images score, so that maps to 0%
+def _verdict(d): return "exact_copy" if d <= 5 else "derivative" if d <= 12 else "unrelated"
 
 def hamming(a, b): return bin(int(a, 16) ^ int(b, 16)).count("1")
 
@@ -211,7 +216,7 @@ def scan(artwork_id):
     art = get_artwork(artwork_id)
     with db() as c: ref = c.execute("SELECT * FROM refs WHERE artwork_id=?", (artwork_id,)).fetchone()
     if not ref: raise ValueError("This artwork has no image to compare against.")
-    h = art.get("phash") or dhash(ref["data"])
+    h = art.get("phash") or dhash(ref["data"]); hf = dhash(ref["data"], True)
     queries = [f"{art['title']} {art['artist']}", f"{art['title']} art", art["description"]]
     queries = [q for q in queries if q.strip()][: int(os.environ.get("MAX_SEARCHES_PER_SCAN", "5"))]
     seen, cands = set(), []
@@ -225,9 +230,9 @@ def scan(artwork_id):
             r = httpx.get(c[0], timeout=15, follow_redirects=True, headers={"User-Agent": "LicenseDesk-Sentinel"})
             if r.status_code != 200 or not r.headers.get("content-type", "").startswith("image/") or len(r.content) > 6_000_000:
                 return (c, None)
-            d = hamming(h, dhash(r.content)); sc = round(100 * (1 - d / 64))
-            v = "exact_copy" if d <= 5 else "derivative" if d <= 12 else "unrelated"
-            return (c, {"verdict": v, "score": sc, "evidence": f"Perceptual-hash distance {d}/64, {sc}% visually similar."})
+            dh = dhash(r.content); d = min(hamming(h, dh), hamming(hf, dh)); sc = _score(d)
+            v = _verdict(d)
+            return (c, {"verdict": v, "score": sc, "evidence": f"Perceptual-hash distance {d}/64 (0 = identical, about 32 = unrelated)."})
         except Exception as e: return (c, {"verdict": "error", "score": 0, "evidence": f"{type(e).__name__}: {str(e)[:100]}"})
     with ThreadPoolExecutor(4) as ex: results = list(ex.map(one, cands))
     found, checked = [], []
@@ -244,6 +249,24 @@ def scan(artwork_id):
         checked.append(row)
     return {"queries_used": len(queries), "images_checked": len(cands), "matches": found, "checked": checked}
 
+def check_image(artwork_id, mime, data):
+    """Artist uploads a suspect image; same matching as the web scan."""
+    art = get_artwork(artwork_id)
+    with db() as c: ref = c.execute("SELECT * FROM refs WHERE artwork_id=?", (artwork_id,)).fetchone()
+    if not ref: raise ValueError("This artwork has no image to compare against.")
+    h = art.get("phash") or dhash(ref["data"]); hf = dhash(ref["data"], True)
+    dh = dhash(data); d = min(hamming(h, dh), hamming(hf, dh)); v = _verdict(d); sc = _score(d)
+    ev = f"Perceptual-hash distance {d}/64 (0 = identical, about 32 = unrelated)."
+    out = {"image_url": "", "source_hint": "", "verdict": v, "score": sc, "evidence": ev}
+    if v in ("exact_copy", "derivative"):
+        with db() as c:
+            fid = c.execute("INSERT INTO findings(artwork_id,image_url,source_hint,verdict,score,evidence,created) VALUES(?,?,?,?,?,?,?)",
+                            (artwork_id, "", "Uploaded by the artist", v, sc, ev, time.time())).lastrowid
+            c.execute("INSERT OR REPLACE INTO refs VALUES(?,?,?)", (f"finding-{fid}", mime, data))
+            c.execute("UPDATE findings SET image_url=? WHERE id=?", (f"/findings/{fid}/image", fid))
+        out.update(id=fid, image_url=f"/findings/{fid}/image")
+    return {"images_checked": 1, "matches": [out] if out.get("id") else [], "checked": [out]}
+
 def list_findings():
     with db() as c: return [dict(r) for r in c.execute("SELECT * FROM findings ORDER BY id DESC")]
 
@@ -254,8 +277,9 @@ def invoice_finding(finding_id, recipient_email):
     with db() as c: f = c.execute("SELECT * FROM findings WHERE id=?", (finding_id,)).fetchone()
     if not f: raise ValueError("unknown finding")
     art = get_artwork(f["artwork_id"]); amt = f"{retro_price(art):.2f}"
+    where = f["image_url"] if f["image_url"].startswith("http") else (f["source_hint"] or "the web")
     note = (f"Retroactive commercial license for '{art['title']}' by {art['artist']}. "
-            f"Our scan found a likely unlicensed use at {f['image_url']}. Paying grants a 12-month license.")
+            f"Our scan found a likely unlicensed use at {where}. Paying grants a 12-month license.")
     try:
         inv = _pp("POST", "/v2/invoicing/invoices", {
             "detail": {"currency_code": "USD", "note": note[:4000]},

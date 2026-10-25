@@ -63,6 +63,8 @@ def finding_image(fid: int):
 async def sentinel_check(artwork_id: str = Form(...), image: UploadFile = File(...)):
     return guard(core.check_image, artwork_id, image.content_type, await image.read())
 
+LABELS = {"exact_copy": "Near-identical copy", "derivative": "Edited copy", "similar_composition": "Similar composition"}
+
 @app.get("/findings/{fid}/report", response_class=HTMLResponse)
 def report(fid: int):
     import html, time
@@ -74,8 +76,9 @@ def report(fid: int):
 <p><b>Work:</b> {e(art['title'])} by {e(art['artist'])}<br><b>Detected:</b> {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(f['created']))}</p>
 <div style="display:flex;gap:16px;flex-wrap:wrap"><figure><img src="/artworks/{e(f['artwork_id'])}/image" width="400"><figcaption>Original</figcaption></figure>
 <figure><img src="{e(f['image_url'])}" width="400" referrerpolicy="no-referrer"><figcaption>Found online</figcaption></figure></div>
-<p><b>Verdict:</b> {e(f['verdict'])} &nbsp; <b>Similarity score:</b> {e(f['score'])}/100</p>
-<p><b>Evidence:</b> {e(f['evidence'])}</p>
+<p><b>Result:</b> {LABELS.get(f['verdict'], e(f['verdict']))} &nbsp; <b>Match:</b> {e(f['score'])}%</p>
+<p><b>What this means:</b> {e(f['evidence'])}</p>
+<p style="color:#666"><small><b>How we checked:</b> we shrink both images into a tiny pattern of light and dark areas and compare the two patterns. Nearly identical patterns mean a copy, even if it was resized or recompressed. Moderately similar patterns mean the same layout, pose or color blocks, which can be a redraw or simply a shared trend. This is an automated lead, not a legal conclusion.</small></p>
 <p><b>Image:</b> <a href="{e(f['image_url'])}">{e(f['image_url'])}</a><br><b>Possible source page (verify manually):</b> {e(f['source_hint'])}</p>
 <p style="color:#666"><i>Automated analysis, not legal advice. A person should verify before taking action.</i></p></body>"""
 

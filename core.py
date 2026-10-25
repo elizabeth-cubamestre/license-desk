@@ -65,30 +65,56 @@ def price(art, tier, months):
     return round(max(art["min_price"], art["base_price"] * TIERS[tier] * months / 12), 2)
 
 def _rule_based(intent):
+    import re
     t = intent.lower()
     tier = ("ai_training" if any(w in t for w in ("train", "dataset", "fine-tune", "finetune")) else
-            "commercial" if any(w in t for w in ("ad", "brand", "commercial", "product", "marketing")) else
+            "commercial" if any(w in t for w in ("ad", "brand", "commercial", "product", "marketing", "poster", "campaign")) else
             "editorial" if any(w in t for w in ("article", "news", "blog", "editorial")) else "personal")
-    return {"tier": tier, "months": 6, "rationale": "Keyword-based fallback."}
+    months = 6
+    m = re.search(r"(\d+)\s*(year|yr|month|mo|week|wk)", t)
+    if m:
+        n, u = int(m.group(1)), m.group(2)
+        months = n * 12 if u in ("year", "yr") else max(1, round(n / 4)) if u in ("week", "wk") else n
+    elif "year" in t: months = 12
+    return {"tier": tier, "months": max(1, min(60, months)),
+            "rationale": "Estimated with built-in licensing rules because the AI agent was unavailable."}
+
+def _providers():
+    ps = []
+    if os.environ.get("LLM_API_KEY"): ps.append((os.environ["LLM_BASE_URL"], os.environ["LLM_API_KEY"], os.environ.get("LLM_MODEL", "gemini-2.5-flash")))
+    if os.environ.get("LLM2_API_KEY"): ps.append((os.environ["LLM2_BASE_URL"], os.environ["LLM2_API_KEY"], os.environ["LLM2_MODEL"]))  # backup provider
+    return ps
+
+def _ask_json(system, user):
+    from openai import OpenAI
+    last = None
+    for base, key, model in _providers():
+        for _ in range(2):
+            try:
+                r = OpenAI(base_url=base, api_key=key, timeout=float(os.environ.get("LLM_TIMEOUT", "45")), max_retries=0).chat.completions.create(
+                    model=model, temperature=0, messages=[{"role": "system", "content": system}, {"role": "user", "content": user}])
+                t = r.choices[0].message.content
+                return json.loads(t[t.index("{"): t.rindex("}") + 1])
+            except Exception as e:
+                last = e; time.sleep(2)
+    raise last or RuntimeError("no LLM configured")
+
+LICENSE_SYSTEM = ("You are an artist's licensing agent. Reply with JSON only: "
+    '{"tier": one of personal|editorial|commercial|ai_training, "months": integer 1-60, "rationale": one plain sentence for the buyer}. '
+    "Choose the narrowest tier that covers the stated use. Any use as model training data is ai_training.")
 
 def quote(artwork_id, intent):
-    """Licensing agent: maps a buyer's plain-language intent to a tier + duration, then prices it."""
+    """Licensing agent: maps a buyer's plain-language intent to a tier + duration, then prices it in code."""
     art = get_artwork(artwork_id)
-    choice = _rule_based(intent)
-    if os.environ.get("LLM_API_KEY"):
+    ck = f"quote:{artwork_id}:{intent.strip().lower()}"
+    with db() as c: hit = c.execute("SELECT v FROM cache WHERE k=?", (ck,)).fetchone()
+    choice = json.loads(hit["v"]) if hit else None  # same request, same answer (also keeps demos repeatable)
+    if not choice:
+        choice = _rule_based(intent)
         try:
-            from openai import OpenAI
-            r = OpenAI(base_url=os.environ["LLM_BASE_URL"], api_key=os.environ["LLM_API_KEY"], timeout=float(os.environ.get("LLM_TIMEOUT", "45")), max_retries=1).chat.completions.create(
-                model=os.environ.get("LLM_MODEL", "gemini-2.5-flash"), temperature=0,
-                messages=[{"role": "system", "content": "You are an artist's licensing agent. Reply with JSON only: "
-                           '{"tier": one of personal|editorial|commercial|ai_training, "months": integer 1-60, '
-                           '"rationale": one sentence}. Choose the narrowest tier that covers the stated use. '
-                           "Any use as model training data is ai_training."},
-                          {"role": "user", "content": f"Work: {art['title']} - {art['description']}\nBuyer intent: {intent}"}])
-            txt = r.choices[0].message.content
-            choice = json.loads(txt[txt.index("{"): txt.rindex("}") + 1])
-        except Exception as e:
-            choice["rationale"] += f" (LLM failed: {type(e).__name__}: {str(e)[:200]})"
+            choice = _ask_json(LICENSE_SYSTEM, f"Work: {art['title']} - {art['description']}\nBuyer intent: {intent}")
+            with db() as c: c.execute("INSERT OR REPLACE INTO cache VALUES(?,?)", (ck, json.dumps(choice)))
+        except Exception: pass
     tier = choice.get("tier") if choice.get("tier") in TIERS else "commercial"
     months = max(1, min(60, int(choice.get("months", 6))))
     if tier == "ai_training" and not art.get("allow_ai", 1):
@@ -205,7 +231,12 @@ def dhash(data, flip=False):
     return f"{bits:016x}"
 
 def _score(d): return max(0, round(100 * (1 - d / 32)))  # distance ~32 is what unrelated images score, so that maps to 0%
-def _verdict(d): return "exact_copy" if d <= 5 else "derivative" if d <= 12 else "unrelated"
+def _verdict(d): return "exact_copy" if d <= 5 else "derivative" if d <= 12 else "similar_composition" if d <= 20 else "unrelated"
+def _explain(v):
+    return {"exact_copy": "Looks like the same image as yours, possibly resized or saved at lower quality.",
+            "derivative": "Very close to your image: same layout and colors, with edits such as cropping, a filter or small changes.",
+            "similar_composition": "A different image that shares your layout: similar pose, framing and color areas. It could be a redraw of your work, or someone following the same trend or template. Review it yourself before taking any action.",
+            "unrelated": "No meaningful similarity to your image."}[v]
 
 def hamming(a, b): return bin(int(a, 16) ^ int(b, 16)).count("1")
 
@@ -267,14 +298,14 @@ def scan(artwork_id):
     def one(c):
         try:
             dh = dhash(_fetch_image(c[0])); d = min(hamming(h, dh), hamming(hf, dh)); sc = _score(d)
-            return (c, {"verdict": _verdict(d), "score": sc, "evidence": f"Perceptual-hash distance {d}/64 (0 = identical, about 32 = unrelated)."})
+            return (c, {"verdict": _verdict(d), "score": sc, "evidence": _explain(_verdict(d))})
         except Exception as e:
             return (c, {"verdict": "skipped", "score": 0, "evidence": "Could not analyze: " + ("unsupported format or a blocked page" if "cannot identify" in str(e) else str(e)[:90])})
     with ThreadPoolExecutor(4) as ex: results = list(ex.map(one, cands))
     found, checked = [], []
     for (url, page), j in results:
         row = {"image_url": url, "source_hint": page, **j}
-        if j["verdict"] in ("exact_copy", "derivative"):
+        if j["verdict"] in ("exact_copy", "derivative", "similar_composition"):
             with db() as c:
                 old = c.execute("SELECT id FROM findings WHERE artwork_id=? AND image_url=?", (artwork_id, url)).fetchone()
                 fid = old["id"] if old else c.execute(
@@ -291,9 +322,9 @@ def check_image(artwork_id, mime, data):
     if not ref: raise ValueError("This artwork has no image to compare against.")
     h = art.get("phash") or dhash(ref["data"]); hf = dhash(ref["data"], True)
     dh = dhash(data); d = min(hamming(h, dh), hamming(hf, dh)); v = _verdict(d); sc = _score(d)
-    ev = f"Perceptual-hash distance {d}/64 (0 = identical, about 32 = unrelated)."
+    ev = _explain(v)
     out = {"image_url": "", "source_hint": "", "verdict": v, "score": sc, "evidence": ev}
-    if v in ("exact_copy", "derivative"):
+    if v in ("exact_copy", "derivative", "similar_composition"):
         with db() as c:
             fid = c.execute("INSERT INTO findings(artwork_id,image_url,source_hint,verdict,score,evidence,created) VALUES(?,?,?,?,?,?,?)",
                             (artwork_id, "", "Uploaded by the artist", v, sc, ev, time.time())).lastrowid
@@ -311,6 +342,7 @@ def invoice_finding(finding_id, recipient_email):
     """Turn a confirmed copy into revenue: PayPal invoice for a retroactive license (falls back to an order link)."""
     with db() as c: f = c.execute("SELECT * FROM findings WHERE id=?", (finding_id,)).fetchone()
     if not f: raise ValueError("unknown finding")
+    if f["verdict"] == "similar_composition": raise ValueError("Invoices are only for copies. This result is a similar composition, which may be inspiration rather than copying.")
     art = get_artwork(f["artwork_id"]); amt = f"{retro_price(art):.2f}"
     where = f["image_url"] if f["image_url"].startswith("http") else (f["source_hint"] or "the web")
     note = (f"Retroactive commercial license for '{art['title']}' by {art['artist']}. "

@@ -68,6 +68,7 @@ const $=s=>document.querySelector(s),J={'content-type':'application/json'};
 const esc=t=>String(t??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const api=async(p,o)=>{const r=await fetch(p,o),j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.detail||r.statusText);return j};
 let works=[],cur=null,q=null,gridApi=null;
+const LABEL={exact_copy:'Near-identical copy',derivative:'Edited copy',similar_composition:'Similar composition',unrelated:'Not similar',skipped:'Could not check'};
 function go(t){document.querySelectorAll('section,nav a').forEach(e=>e.classList.remove('on'));$('#'+t).classList.add('on');
 document.querySelector(`nav a[data-t=${t}]`).classList.add('on');if(t==='buy'||t==='protect')load();if(t==='earn')earn()}
 document.querySelectorAll('nav a').forEach(a=>a.onclick=()=>go(a.dataset.t));
@@ -94,10 +95,10 @@ $('#sb').onclick=async()=>{if(!$('#ps').value)return;$('#sb').disabled=true;$('#
 try{const d=await api('/sentinel/scan',{method:'POST',headers:J,body:JSON.stringify({artwork_id:$('#ps').value})});
 show(d)}
 catch(x){$('#pm').innerHTML=`<span class="bad">${esc(x.message)}</span>`}$('#sb').disabled=false};
-function show(d){$('#pm').innerHTML=`${d.mode?`<small>Search mode: ${esc(d.mode)}</small><br>`:''}Checked ${d.images_checked} image${d.images_checked===1?'':'s'}. <b>${d.matches.length} likely cop${d.matches.length===1?'y':'ies'} found.</b> Reports and invoices appear only for likely copies.`;
+function show(d){$('#pm').innerHTML=`${d.mode?`<small>Search mode: ${esc(d.mode)}</small><br>`:''}Checked ${d.images_checked} image${d.images_checked===1?'':'s'}. <b>${d.matches.length} result${d.matches.length===1?'':'s'} worth a closer look.</b> Each one has a report. Invoices are offered only for copies, not for similar compositions.`;
 $('#pres').innerHTML=d.checked.map(c=>`<div class="hit"><img src="${esc(c.image_url)}" alt="" referrerpolicy="no-referrer" onerror="this.style.visibility='hidden'"><div>
-<b class="${c.id?'bad':''}">${esc(c.verdict.replace('_',' '))}, ${c.score}% similar</b><br><small>${esc(c.evidence)}</small>
-${c.id?`<br><a href="/findings/${c.id}/report" target="_blank">View report</a><div style="display:flex;gap:8px;margin-top:8px"><input id="em${c.id}" placeholder="Their PayPal email" style="flex:1"><button onclick="inv(${c.id})">Invoice for license</button></div><div id="iv${c.id}"></div>`:''}</div></div>`).join('')}
+<b class="${c.id?'bad':''}">${LABEL[c.verdict]||esc(c.verdict)}, ${c.score}% match</b><br><small>${esc(c.evidence)}</small>
+${c.id?`<br><a href="/findings/${c.id}/report" target="_blank">View report</a>${c.verdict==='similar_composition'?'<br><small>No invoice offered: this may be inspiration or a shared trend, so review it yourself.</small>':`<div style="display:flex;gap:8px;margin-top:8px"><input id="em${c.id}" placeholder="Their PayPal email" style="flex:1"><button onclick="inv(${c.id})">Invoice for license</button></div><div id="iv${c.id}"></div>`}`:''}</div></div>`).join('')}
 $('#cb').onclick=async()=>{const f=$('#cf').files[0];if(!f||!$('#ps').value)return;$('#pm').textContent='Comparing...';$('#pres').innerHTML='';
 const fd=new FormData();fd.set('artwork_id',$('#ps').value);fd.set('image',f);
 try{show(await api('/sentinel/check',{method:'POST',body:fd}))}catch(x){$('#pm').innerHTML=`<span class="bad">${esc(x.message)}</span>`}};

@@ -10,12 +10,12 @@ from mcp.client.stdio import stdio_client
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 p = argparse.ArgumentParser()
-p.add_argument("task"); p.add_argument("--budget", type=float, required=True); p.add_argument("--max-steps", type=int, default=14)
+p.add_argument("task"); p.add_argument("--budget", type=float, required=True); p.add_argument("--max-steps", type=int, default=20)
 a = p.parse_args()
 llm = OpenAI(base_url=os.environ["LLM_BASE_URL"], api_key=os.environ["LLM_API_KEY"], timeout=60, max_retries=0)
 MODEL = os.environ.get("LLM_MODEL", "gemini-2.5-flash")
 SYSTEM = f"""You are a purchasing agent that licenses artwork for a client. Budget: ${a.budget:.2f} maximum.
-Steps: search_licenses to find suitable work; get_quote with the client's plain-language use; if the price fits the budget,
+Steps: search_licenses (a few keywords; leave the query empty to list everything) to find suitable work; get_quote with the client's plain-language use; if the price fits the budget,
 purchase_license with exactly the quoted artwork_id, tier and months; then complete_purchase with the order_id (a human
 approves the payment in PayPal, the tool waits); then verify_receipt. If a work is refused or too expensive, try another
 or stop and explain. Never exceed the budget. Finish with a short plain-English summary of what you did and paid."""
@@ -30,13 +30,17 @@ def chat(msgs, tools):
 
 async def main():
     params = StdioServerParameters(command=sys.executable, args=[str(ROOT / "mcp_server.py")], env=dict(os.environ), cwd=str(ROOT))
-    async with stdio_client(params) as (r, w), ClientSession(r, w) as s:
+    async with stdio_client(params, errlog=open(os.devnull, "w")) as (r, w), ClientSession(r, w) as s:
         await s.initialize()
         tools = [{"type": "function", "function": {"name": t.name, "description": t.description or "", "parameters": t.inputSchema}}
                  for t in (await s.list_tools()).tools]
-        quotes, refused = {}, set()
+        quotes, refused, searched = {}, set(), set()
 
         async def call(name, args):
+            if name == "search_licenses":
+                k = json.dumps(args, sort_keys=True)
+                if k in searched: return "You already ran this search. Use the results you have, or search with an empty query to list everything."
+                searched.add(k)
             if name == "purchase_license":  # hard guardrails live in code, not in the prompt
                 key = (args.get("artwork_id"), args.get("tier"), args.get("months"))
                 if key in refused: return "BLOCKED: the artist's rules forbid this use."

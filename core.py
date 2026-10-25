@@ -50,10 +50,16 @@ def init():
                 with db() as c: c.execute("UPDATE artworks SET phash=? WHERE id=?", (dhash(data), aid))
 
 def list_artworks(query=""):
-    q = f"%{query.lower()}%"
-    with db() as c:
-        rows = c.execute("SELECT * FROM artworks WHERE lower(title||description||artist) LIKE ?", (q,)).fetchall()
-    return [dict(r) for r in rows]
+    """Keyword search over title, artist and description. The catalog is small, so never return nothing."""
+    import re
+    words = [w for w in re.split(r"\W+", query.lower()) if len(w) > 2]
+    with db() as c: rows = [dict(r) for r in c.execute("SELECT * FROM artworks")]
+    if not words: return rows
+    def score(a):
+        text = f"{a['title']} {a['artist']} {a['description']}".lower()
+        return sum(w in text for w in words)
+    ranked = sorted(rows, key=score, reverse=True)
+    return [a for a in ranked if score(a) > 0] or rows
 
 def get_artwork(aid):
     with db() as c:

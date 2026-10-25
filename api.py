@@ -1,5 +1,5 @@
 """HTTP API. Run: uvicorn api:app --reload   Docs: http://localhost:8000/docs"""
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
 import core
@@ -68,3 +68,17 @@ def report(fid: int):
 <p><b>Evidence:</b> {e(f['evidence'])}</p>
 <p><b>Image:</b> <a href="{e(f['image_url'])}">{e(f['image_url'])}</a><br><b>Possible source page (verify manually):</b> {e(f['source_hint'])}</p>
 <p style="color:#666"><i>Automated analysis, not legal advice. A person should verify before taking action.</i></p></body>"""
+
+@app.post("/artworks")
+async def add_artwork(title: str = Form(...), artist: str = Form(...), description: str = Form(""),
+                      base_price: float = Form(...), min_price: float = Form(...), allow_ai: bool = Form(True),
+                      image: UploadFile = File(...)):
+    return guard(core.create_artwork, title, artist, description, base_price, min_price, allow_ai,
+                 image.content_type, await image.read())
+
+@app.get("/licenses")
+def licenses(): return core.list_licenses()
+
+import os
+from fastapi.staticfiles import StaticFiles
+app.mount("/", StaticFiles(directory=os.path.join(os.path.dirname(os.path.abspath(__file__)), "static"), html=True), name="ui")

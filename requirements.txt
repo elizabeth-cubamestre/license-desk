@@ -5,3 +5,4 @@ openai
 mcp
 python-dotenv
 python-multipart
+Pillow

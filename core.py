@@ -31,8 +31,11 @@ def init():
         c.execute("""CREATE TABLE IF NOT EXISTS findings(id INTEGER PRIMARY KEY AUTOINCREMENT, artwork_id TEXT,
                      image_url TEXT, source_hint TEXT, verdict TEXT, score INTEGER, evidence TEXT,
                      status TEXT DEFAULT 'OPEN', invoice TEXT, created REAL)""")
+        for col in ("allow_ai INTEGER DEFAULT 1", "phash TEXT"):
+            try: c.execute(f"ALTER TABLE artworks ADD COLUMN {col}")
+            except sqlite3.OperationalError: pass
         if not c.execute("SELECT 1 FROM artworks").fetchone():
-            c.executemany("INSERT INTO artworks VALUES(?,?,?,?,?,?)", SEED)
+            c.executemany("INSERT INTO artworks(id,title,artist,description,base_price,min_price) VALUES(?,?,?,?,?,?)", SEED)
 
 def list_artworks(query=""):
     q = f"%{query.lower()}%"
@@ -76,6 +79,9 @@ def quote(artwork_id, intent):
             choice["rationale"] += f" (LLM failed: {type(e).__name__}: {str(e)[:200]})"
     tier = choice.get("tier") if choice.get("tier") in TIERS else "commercial"
     months = max(1, min(60, int(choice.get("months", 6))))
+    if tier == "ai_training" and not art.get("allow_ai", 1):
+        return {"artwork_id": artwork_id, "title": art["title"], "refused": True, "tier": tier, "months": months, "amount": 0,
+                "currency": "USD", "rationale": "The artist does not allow this work to be used for AI training."}
     return {"artwork_id": artwork_id, "title": art["title"], "tier": tier, "months": months,
             "amount": price(art, tier, months), "currency": "USD", "rationale": choice.get("rationale", "")}
 
@@ -98,6 +104,7 @@ def _pp(method, path, body=None, req_id=None):
 def create_order(artwork_id, tier, months, amount=None):
     art = get_artwork(artwork_id)
     if tier not in TIERS: raise ValueError("bad tier")
+    if tier == "ai_training" and not art.get("allow_ai", 1): raise ValueError("The artist does not allow AI training use")
     amount = amount if amount is not None else price(art, tier, months)  # API callers never pass amount; server prices it
     o = _pp("POST", "/v2/checkout/orders", {
         "intent": "CAPTURE",
@@ -173,55 +180,68 @@ def _tavily(query):
     with db() as c: c.execute("INSERT OR REPLACE INTO cache VALUES(?,?)", (query, json.dumps(out)))
     return out
 
-def _compare(ref_mime, ref_data, art, image_url):
-    img = httpx.get(image_url, timeout=15, follow_redirects=True, headers={"User-Agent": "LicenseDesk-Sentinel"})
-    mime = img.headers.get("content-type", "").split(";")[0]
-    if img.status_code != 200 or not mime.startswith("image/") or len(img.content) > 4_000_000: return None
-    from openai import OpenAI, RateLimitError
-    client = OpenAI(base_url=os.environ["LLM_BASE_URL"], api_key=os.environ["LLM_API_KEY"],
-                    timeout=float(os.environ.get("LLM_TIMEOUT", "45")), max_retries=0)
-    msgs = [{"role": "user", "content": [
-        {"type": "text", "text": f"Image 1 is the original artwork '{art['title']}' by {art['artist']}. Image 2 was found online. "
-         'Reply JSON only: {"verdict": "exact_copy"|"derivative"|"style_imitation"|"unrelated", "score": 0-100, '
-         '"evidence": "specific shared or differing elements"}. Similar style alone is NOT copying; '
-         "use exact_copy/derivative only if specific expression (characters, composition, frames) is reproduced."},
-        {"type": "image_url", "image_url": {"url": _data_url(ref_mime, ref_data)}},
-        {"type": "image_url", "image_url": {"url": _data_url(mime, img.content)}}]}]
-    for attempt in range(3):  # free tiers rate-limit: wait and retry instead of failing
-        try:
-            r = client.chat.completions.create(model=os.environ.get("LLM_MODEL", "gemini-2.5-flash"), temperature=0, messages=msgs)
-            break
-        except RateLimitError:
-            if attempt == 2: raise
-            time.sleep(20)
-    t = r.choices[0].message.content
-    return json.loads(t[t.index("{"): t.rindex("}") + 1])
+def dhash(data):
+    """64-bit perceptual hash: survives resizing, recompression and mild edits. Runs locally, no API quota."""
+    import io
+    from PIL import Image
+    px = list(Image.open(io.BytesIO(data)).convert("L").resize((9, 8)).getdata())
+    bits = 0
+    for r in range(8):
+        for c in range(8): bits = (bits << 1) | (px[r * 9 + c] > px[r * 9 + c + 1])
+    return f"{bits:016x}"
+
+def hamming(a, b): return bin(int(a, 16) ^ int(b, 16)).count("1")
+
+def create_artwork(title, artist, description, base_price, min_price, allow_ai, mime, data):
+    if base_price <= 0 or min_price <= 0: raise ValueError("Prices must be above zero")
+    h = dhash(data); aid = "art-" + uuid.uuid4().hex[:6]
+    with db() as c:
+        c.execute("INSERT INTO artworks(id,title,artist,description,base_price,min_price,allow_ai,phash) VALUES(?,?,?,?,?,?,?,?)",
+                  (aid, title.strip(), artist.strip(), description.strip(), base_price, min_price, int(allow_ai), h))
+    save_reference(aid, mime, data)
+    return get_artwork(aid)
+
+def list_licenses():
+    with db() as c:
+        rows = c.execute("""SELECT o.order_id, o.tier, o.months, o.amount, o.created, a.title, a.artist FROM orders o
+                            JOIN artworks a ON a.id=o.artwork_id WHERE o.status='COMPLETED' ORDER BY o.created DESC""").fetchall()
+    return [dict(r) for r in rows]
 
 def scan(artwork_id):
     art = get_artwork(artwork_id)
     with db() as c: ref = c.execute("SELECT * FROM refs WHERE artwork_id=?", (artwork_id,)).fetchone()
-    if not ref: raise ValueError("Upload a reference image first: POST /artworks/{id}/image")
-    queries = [f"{art['title']} {art['artist']}", f"{art['title']} animation", art["description"]]
-    queries = queries[: int(os.environ.get("MAX_SEARCHES_PER_SCAN", "5"))]
+    if not ref: raise ValueError("This artwork has no image to compare against.")
+    h = art.get("phash") or dhash(ref["data"])
+    queries = [f"{art['title']} {art['artist']}", f"{art['title']} art", art["description"]]
+    queries = [q for q in queries if q.strip()][: int(os.environ.get("MAX_SEARCHES_PER_SCAN", "5"))]
     seen, cands = set(), []
     for q in queries:
         t = _tavily(q)
         for u in t["images"]:
             if u and u not in seen: seen.add(u); cands.append((u, t["page"]))
-    cands = cands[: int(os.environ.get("MAX_IMAGES", "4"))]  # protects free LLM quota
+    cands = cands[: int(os.environ.get("MAX_IMAGES", "12"))]
     def one(c):
-        try: return (c, _compare(ref["mime"], ref["data"], art, c[0]))
-        except Exception as e: return (c, {"verdict": "error", "score": 0, "evidence": f"{type(e).__name__}: {str(e)[:120]}"})
-    with ThreadPoolExecutor(int(os.environ.get("SCAN_WORKERS", "1"))) as ex: results = list(ex.map(one, cands))
-    found = []
+        try:
+            r = httpx.get(c[0], timeout=15, follow_redirects=True, headers={"User-Agent": "LicenseDesk-Sentinel"})
+            if r.status_code != 200 or not r.headers.get("content-type", "").startswith("image/") or len(r.content) > 6_000_000:
+                return (c, None)
+            d = hamming(h, dhash(r.content)); sc = round(100 * (1 - d / 64))
+            v = "exact_copy" if d <= 5 else "derivative" if d <= 12 else "unrelated"
+            return (c, {"verdict": v, "score": sc, "evidence": f"Perceptual-hash distance {d}/64, {sc}% visually similar."})
+        except Exception as e: return (c, {"verdict": "error", "score": 0, "evidence": f"{type(e).__name__}: {str(e)[:100]}"})
+    with ThreadPoolExecutor(4) as ex: results = list(ex.map(one, cands))
+    found, checked = [], []
     for (url, page), j in results:
-        if j and j.get("verdict") in ("exact_copy", "derivative") and int(j.get("score", 0)) >= 60:
+        j = j or {"verdict": "skipped", "score": 0, "evidence": "Not a downloadable image."}
+        row = {"image_url": url, "source_hint": page, **j}
+        if j["verdict"] in ("exact_copy", "derivative"):
             with db() as c:
-                cur = c.execute("INSERT INTO findings(artwork_id,image_url,source_hint,verdict,score,evidence,created) VALUES(?,?,?,?,?,?,?)",
-                                (artwork_id, url, page, j["verdict"], int(j["score"]), j.get("evidence", ""), time.time()))
-            found.append({"id": cur.lastrowid, "image_url": url, "source_hint": page, **j})
-    checked = [{"image_url": u, "source_hint": p, **(j or {"verdict": "skipped", "score": 0, "evidence": "Could not analyze."})}
-               for (u, p), j in results]
+                old = c.execute("SELECT id FROM findings WHERE artwork_id=? AND image_url=?", (artwork_id, url)).fetchone()
+                fid = old["id"] if old else c.execute(
+                    "INSERT INTO findings(artwork_id,image_url,source_hint,verdict,score,evidence,created) VALUES(?,?,?,?,?,?,?)",
+                    (artwork_id, url, page, j["verdict"], j["score"], j["evidence"], time.time())).lastrowid
+            row["id"] = fid; found.append(row)
+        checked.append(row)
     return {"queries_used": len(queries), "images_checked": len(cands), "matches": found, "checked": checked}
 
 def list_findings():

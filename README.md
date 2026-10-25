@@ -11,7 +11,7 @@ AI is using artists' work without asking, and watermarks and scraping defences k
 - **Signed licenses:** HMAC-signed receipts that anyone can verify through `/receipts/verify` or the MCP tool.
 - **MCP server for agents:** five tools (`search_licenses`, `get_quote`, `purchase_license`, `complete_purchase`, `verify_receipt`).
 - **Budget-capped buyer agent:** a live LLM agent buys a license end to end. Budget and artist rules are enforced in code, so the model cannot overspend or override them.
-- **Sentinel:** searches the web (Tavily) for copies, compares them to the original with perceptual hashing (resizes, recompression, mirroring, light edits), produces a report, and sends a PayPal invoice for a retroactive license. Artists can also upload a suspect image directly.
+- **Sentinel:** runs a reverse image search (Google Lens via SerpApi) on the artwork itself, never its title, then compares matches to the original with perceptual hashing (resizes, recompression, mirroring, light edits), produces a report, and sends a PayPal invoice for a retroactive license. Artists can also upload a suspect image directly.
 - **Earnings dashboard** built with AG Grid.
 
 ## PayPal APIs used
@@ -20,7 +20,7 @@ Orders v2 (create, get, capture), Invoicing v2 (create, send; falls back to an o
 ## AI tools used
 - Any OpenAI-compatible LLM for the licensing agent and the buyer agent (tested with Gemini and Groq).
 - Model Context Protocol (MCP) Python SDK for agent tools.
-- Tavily Search API for finding suspected copies.
+- SerpApi (Google Lens) for reverse image search.
 - AG Grid Community for the dashboard.
 
 ## Quickstart (about 10 minutes)
@@ -36,7 +36,7 @@ Open http://localhost:8000.
 **Keys you need**
 1. PayPal sandbox app: developer.paypal.com, Apps & Credentials, Sandbox. Put the Client ID and Secret in `.env`. Optionally tick **Invoicing** in the app's features.
 2. An LLM key (optional; without one, quotes use a keyword fallback). Examples: Groq (`LLM_BASE_URL=https://api.groq.com/openai/v1`) or Google AI Studio.
-3. Tavily key (only for the web scan; the suspect-image check works without it).
+3. SerpApi key (only for the web scan, which also needs a public deployed URL; the suspect-image check works without either).
 
 **Sandbox buyer for testing payments:** use any Personal account from Testing Tools > Sandbox Accounts in the PayPal developer dashboard. Judges: a ready-to-use buyer login is provided in the submission notes.
 

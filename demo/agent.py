@@ -3,7 +3,7 @@ Run from the project folder:  python demo/agent.py "I need a cat character for a
 import argparse, asyncio, json, os, sys, time, webbrowser
 from pathlib import Path
 from dotenv import load_dotenv
-from openai import OpenAI, RateLimitError
+from openai import OpenAI, RateLimitError, InternalServerError, APIConnectionError, APITimeoutError
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
@@ -23,14 +23,14 @@ or stop and explain. Never exceed the budget. Finish with a short plain-English 
 def text(res): return "\n".join(c.text for c in res.content if hasattr(c, "text"))
 
 def chat(msgs, tools):
-    for _ in range(4):
+    for _ in range(8):
         try: return llm.chat.completions.create(model=MODEL, messages=msgs, tools=tools, temperature=0).choices[0].message
-        except RateLimitError: print("  (LLM rate limited, waiting 20s)"); time.sleep(20)
-    sys.exit("LLM rate limit. Try again in a few minutes.")
+        except (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError) as e: print(f"  (LLM busy: {type(e).__name__}, retrying in 15s)"); time.sleep(15)
+    sys.exit("The LLM is overloaded or rate limited. Try again in a few minutes, or switch providers in .env.")
 
 async def main():
     params = StdioServerParameters(command=sys.executable, args=[str(ROOT / "mcp_server.py")], env=dict(os.environ), cwd=str(ROOT))
-    async with stdio_client(params, errlog=open(os.devnull, "w")) as (r, w), ClientSession(r, w) as s:
+    async with stdio_client(params) as (r, w), ClientSession(r, w) as s:
         await s.initialize()
         tools = [{"type": "function", "function": {"name": t.name, "description": t.description or "", "parameters": t.inputSchema}}
                  for t in (await s.list_tools()).tools]

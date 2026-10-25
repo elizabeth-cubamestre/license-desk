@@ -94,7 +94,7 @@ $('#sb').onclick=async()=>{if(!$('#ps').value)return;$('#sb').disabled=true;$('#
 try{const d=await api('/sentinel/scan',{method:'POST',headers:J,body:JSON.stringify({artwork_id:$('#ps').value})});
 show(d)}
 catch(x){$('#pm').innerHTML=`<span class="bad">${esc(x.message)}</span>`}$('#sb').disabled=false};
-function show(d){$('#pm').innerHTML=`Checked ${d.images_checked} image${d.images_checked===1?'':'s'}. <b>${d.matches.length} likely cop${d.matches.length===1?'y':'ies'} found.</b> Reports and invoices appear only for likely copies.`;
+function show(d){$('#pm').innerHTML=`${d.mode?`<small>Search mode: ${esc(d.mode)}</small><br>`:''}Checked ${d.images_checked} image${d.images_checked===1?'':'s'}. <b>${d.matches.length} likely cop${d.matches.length===1?'y':'ies'} found.</b> Reports and invoices appear only for likely copies.`;
 $('#pres').innerHTML=d.checked.map(c=>`<div class="hit"><img src="${esc(c.image_url)}" alt="" referrerpolicy="no-referrer" onerror="this.style.visibility='hidden'"><div>
 <b class="${c.id?'bad':''}">${esc(c.verdict.replace('_',' '))}, ${c.score}% similar</b><br><small>${esc(c.evidence)}</small>
 ${c.id?`<br><a href="/findings/${c.id}/report" target="_blank">View report</a><div style="display:flex;gap:8px;margin-top:8px"><input id="em${c.id}" placeholder="Their PayPal email" style="flex:1"><button onclick="inv(${c.id})">Invoice for license</button></div><div id="iv${c.id}"></div>`:''}</div></div>`).join('')}

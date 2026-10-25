@@ -12,9 +12,9 @@ PUBLIC_URL = os.environ.get("PUBLIC_URL", "http://localhost:8000")
 TIERS = {"personal": 1.0, "editorial": 2.0, "commercial": 5.0, "ai_training": 20.0}
 
 SEED = [
-    ("art-001", "Neon Koi Run", "Mira Tanaka", "Hand-drawn 2D animation loop of koi in a neon city", 20.0, 10.0),
-    ("art-002", "Paper Moon Lullaby", "Diego Ruiz", "Stop-motion style short with paper puppets", 30.0, 15.0),
-    ("art-003", "Orbit Cats", "Amara Okafor", "Character design sheet and walk cycles for a cat astronaut crew", 25.0, 12.0),
+    ("art-001", "Purple Haired Amazement", "Alexis Cuba Mestre", "Digital illustration of a purple-haired character with a joyful, wide-eyed expression", 20.0, 10.0),
+    ("art-002", "Pink Girl in Despair", "Alexis Cuba Mestre", "Digital illustration of a girl in a pink dress curled over on a folding chair, purple and black background", 20.0, 10.0),
+    ("art-003", "Takiyasha the Witch and the Skeleton Spectre", "Utagawa Kuniyoshi", "Public domain ukiyo-e triptych, included as a sample of widely copied published work", 20.0, 10.0),
 ]
 
 def db():
@@ -246,7 +246,8 @@ def _lens(artwork_id):
     r.raise_for_status()
     out = [(m.get("thumbnail") or m.get("image"), m.get("link", "")) for m in r.json().get("visual_matches", [])[:25]
            if m.get("thumbnail") or m.get("image")]
-    with db() as c: c.execute("INSERT OR REPLACE INTO cache VALUES(?,?)", (ck, json.dumps(out)))
+    if out:
+        with db() as c: c.execute("INSERT OR REPLACE INTO cache VALUES(?,?)", (ck, json.dumps(out)))
     return out
 
 def scan(artwork_id):
@@ -254,25 +255,21 @@ def scan(artwork_id):
     with db() as c: ref = c.execute("SELECT * FROM refs WHERE artwork_id=?", (artwork_id,)).fetchone()
     if not ref: raise ValueError("This artwork has no image to compare against.")
     h = art.get("phash") or dhash(ref["data"]); hf = dhash(ref["data"], True)
-    cands, mode, queries = None, "reverse image search", []
+    key, base = os.environ.get("SERPAPI_KEY"), os.environ.get("PUBLIC_URL", "")
+    if not key: raise ValueError("Reverse image search is not configured: set SERPAPI_KEY.")
+    if not base or "localhost" in base or "127.0.0.1" in base:
+        raise ValueError("Reverse image search needs a public PUBLIC_URL (your deployed address) so Google can fetch the image. Locally, use 'check a suspect image'.")
     try: cands = _lens(artwork_id)
-    except Exception: cands = None
-    if not cands:
-        mode = "keyword web search"
-        queries = [q for q in [f"{art['title']} {art['artist']}", f"{art['title']} art", art["description"]] if q.strip()]
-        queries = queries[: int(os.environ.get("MAX_SEARCHES_PER_SCAN", "5"))]
-        seen, cands = set(), []
-        for q in queries:
-            t = _tavily(q)
-            for u in t["images"]:
-                if u and u not in seen: seen.add(u); cands.append((u, t["page"]))
+    except Exception as e: raise ValueError(f"Google Lens search failed: {str(e)[:150]}")
+    mode, queries = "reverse image search (Google Lens). Titles and descriptions are not used.", []
+    if not cands: return {"mode": mode, "queries_used": 0, "images_checked": 0, "matches": [], "checked": []}
     cands = cands[: int(os.environ.get("MAX_IMAGES", "12"))]
     def one(c):
         try:
             dh = dhash(_fetch_image(c[0])); d = min(hamming(h, dh), hamming(hf, dh)); sc = _score(d)
             return (c, {"verdict": _verdict(d), "score": sc, "evidence": f"Perceptual-hash distance {d}/64 (0 = identical, about 32 = unrelated)."})
         except Exception as e:
-            return (c, {"verdict": "skipped", "score": 0, "evidence": f"Could not analyze: {str(e)[:90]}"})
+            return (c, {"verdict": "skipped", "score": 0, "evidence": "Could not analyze: " + ("unsupported format or a blocked page" if "cannot identify" in str(e) else str(e)[:90])})
     with ThreadPoolExecutor(4) as ex: results = list(ex.map(one, cands))
     found, checked = [], []
     for (url, page), j in results:

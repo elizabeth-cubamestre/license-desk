@@ -177,17 +177,23 @@ def _compare(ref_mime, ref_data, art, image_url):
     img = httpx.get(image_url, timeout=15, follow_redirects=True, headers={"User-Agent": "LicenseDesk-Sentinel"})
     mime = img.headers.get("content-type", "").split(";")[0]
     if img.status_code != 200 or not mime.startswith("image/") or len(img.content) > 4_000_000: return None
-    from openai import OpenAI
-    r = OpenAI(base_url=os.environ["LLM_BASE_URL"], api_key=os.environ["LLM_API_KEY"],
-               timeout=float(os.environ.get("LLM_TIMEOUT", "45")), max_retries=1).chat.completions.create(
-        model=os.environ.get("LLM_MODEL", "gemini-2.5-flash"), temperature=0,
-        messages=[{"role": "user", "content": [
-            {"type": "text", "text": f"Image 1 is the original artwork '{art['title']}' by {art['artist']}. Image 2 was found online. "
-             'Reply JSON only: {"verdict": "exact_copy"|"derivative"|"style_imitation"|"unrelated", "score": 0-100, '
-             '"evidence": "specific shared or differing elements"}. Similar style alone is NOT copying; '
-             "use exact_copy/derivative only if specific expression (characters, composition, frames) is reproduced."},
-            {"type": "image_url", "image_url": {"url": _data_url(ref_mime, ref_data)}},
-            {"type": "image_url", "image_url": {"url": _data_url(mime, img.content)}}]}])
+    from openai import OpenAI, RateLimitError
+    client = OpenAI(base_url=os.environ["LLM_BASE_URL"], api_key=os.environ["LLM_API_KEY"],
+                    timeout=float(os.environ.get("LLM_TIMEOUT", "45")), max_retries=0)
+    msgs = [{"role": "user", "content": [
+        {"type": "text", "text": f"Image 1 is the original artwork '{art['title']}' by {art['artist']}. Image 2 was found online. "
+         'Reply JSON only: {"verdict": "exact_copy"|"derivative"|"style_imitation"|"unrelated", "score": 0-100, '
+         '"evidence": "specific shared or differing elements"}. Similar style alone is NOT copying; '
+         "use exact_copy/derivative only if specific expression (characters, composition, frames) is reproduced."},
+        {"type": "image_url", "image_url": {"url": _data_url(ref_mime, ref_data)}},
+        {"type": "image_url", "image_url": {"url": _data_url(mime, img.content)}}]}]
+    for attempt in range(3):  # free tiers rate-limit: wait and retry instead of failing
+        try:
+            r = client.chat.completions.create(model=os.environ.get("LLM_MODEL", "gemini-2.5-flash"), temperature=0, messages=msgs)
+            break
+        except RateLimitError:
+            if attempt == 2: raise
+            time.sleep(20)
     t = r.choices[0].message.content
     return json.loads(t[t.index("{"): t.rindex("}") + 1])
 
@@ -202,11 +208,11 @@ def scan(artwork_id):
         t = _tavily(q)
         for u in t["images"]:
             if u and u not in seen: seen.add(u); cands.append((u, t["page"]))
-    cands = cands[:8]
+    cands = cands[: int(os.environ.get("MAX_IMAGES", "4"))]  # protects free LLM quota
     def one(c):
         try: return (c, _compare(ref["mime"], ref["data"], art, c[0]))
         except Exception as e: return (c, {"verdict": "error", "score": 0, "evidence": f"{type(e).__name__}: {str(e)[:120]}"})
-    with ThreadPoolExecutor(4) as ex: results = list(ex.map(one, cands))
+    with ThreadPoolExecutor(int(os.environ.get("SCAN_WORKERS", "1"))) as ex: results = list(ex.map(one, cands))
     found = []
     for (url, page), j in results:
         if j and j.get("verdict") in ("exact_copy", "derivative") and int(j.get("score", 0)) >= 60:

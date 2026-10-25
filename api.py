@@ -1,6 +1,6 @@
 """HTTP API. Run: uvicorn api:app --reload   Docs: http://localhost:8000/docs"""
 from fastapi import FastAPI, HTTPException, UploadFile, File
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
 import core
 
@@ -46,3 +46,25 @@ def sentinel_scan(b: ScanIn): return guard(core.scan, b.artwork_id)
 def findings(): return core.list_findings()
 @app.post("/findings/{fid}/invoice")
 def invoice(fid: int, b: InvoiceIn): return guard(core.invoice_finding, fid, b.recipient_email)
+
+@app.get("/artworks/{aid}/image")
+def reference_image(aid: str):
+    with core.db() as c: r = c.execute("SELECT * FROM refs WHERE artwork_id=?", (aid,)).fetchone()
+    if not r: raise HTTPException(404, "no reference image")
+    return Response(r["data"], media_type=r["mime"])
+
+@app.get("/findings/{fid}/report", response_class=HTMLResponse)
+def report(fid: int):
+    import html, time
+    with core.db() as c: f = c.execute("SELECT * FROM findings WHERE id=?", (fid,)).fetchone()
+    if not f: raise HTTPException(404, "unknown finding")
+    art = core.get_artwork(f["artwork_id"]); e = lambda v: html.escape(str(v))
+    return f"""<body style="font:16px/1.5 system-ui;max-width:860px;margin:2rem auto;padding:0 1rem">
+<h1>Similarity report #{f['id']}</h1>
+<p><b>Work:</b> {e(art['title'])} by {e(art['artist'])}<br><b>Detected:</b> {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(f['created']))}</p>
+<div style="display:flex;gap:16px;flex-wrap:wrap"><figure><img src="/artworks/{e(f['artwork_id'])}/image" width="400"><figcaption>Original</figcaption></figure>
+<figure><img src="{e(f['image_url'])}" width="400" referrerpolicy="no-referrer"><figcaption>Found online</figcaption></figure></div>
+<p><b>Verdict:</b> {e(f['verdict'])} &nbsp; <b>Similarity score:</b> {e(f['score'])}/100</p>
+<p><b>Evidence:</b> {e(f['evidence'])}</p>
+<p><b>Image:</b> <a href="{e(f['image_url'])}">{e(f['image_url'])}</a><br><b>Possible source page (verify manually):</b> {e(f['source_hint'])}</p>
+<p style="color:#666"><i>Automated analysis, not legal advice. A person should verify before taking action.</i></p></body>"""

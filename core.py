@@ -95,10 +95,10 @@ def _pp(method, path, body=None, req_id=None):
     if r.status_code >= 400: raise RuntimeError(f"PayPal {r.status_code}: {r.text[:400]}")
     return r.json()
 
-def create_order(artwork_id, tier, months):
+def create_order(artwork_id, tier, months, amount=None):
     art = get_artwork(artwork_id)
     if tier not in TIERS: raise ValueError("bad tier")
-    amount = price(art, tier, months)  # always recomputed server-side
+    amount = amount if amount is not None else price(art, tier, months)  # API callers never pass amount; server prices it
     o = _pp("POST", "/v2/checkout/orders", {
         "intent": "CAPTURE",
         "purchase_units": [{"reference_id": artwork_id, "custom_id": f"{tier}:{months}",
@@ -205,7 +205,7 @@ def scan(artwork_id):
     cands = cands[:8]
     def one(c):
         try: return (c, _compare(ref["mime"], ref["data"], art, c[0]))
-        except Exception: return (c, None)
+        except Exception as e: return (c, {"verdict": "error", "score": 0, "evidence": f"{type(e).__name__}: {str(e)[:120]}"})
     with ThreadPoolExecutor(4) as ex: results = list(ex.map(one, cands))
     found = []
     for (url, page), j in results:
@@ -214,7 +214,9 @@ def scan(artwork_id):
                 cur = c.execute("INSERT INTO findings(artwork_id,image_url,source_hint,verdict,score,evidence,created) VALUES(?,?,?,?,?,?,?)",
                                 (artwork_id, url, page, j["verdict"], int(j["score"]), j.get("evidence", ""), time.time()))
             found.append({"id": cur.lastrowid, "image_url": url, "source_hint": page, **j})
-    return {"queries_used": len(queries), "images_checked": len(cands), "matches": found}
+    checked = [{"image_url": u, "source_hint": p, **(j or {"verdict": "skipped", "score": 0, "evidence": "Could not analyze."})}
+               for (u, p), j in results]
+    return {"queries_used": len(queries), "images_checked": len(cands), "matches": found, "checked": checked}
 
 def list_findings():
     with db() as c: return [dict(r) for r in c.execute("SELECT * FROM findings ORDER BY id DESC")]
@@ -238,7 +240,7 @@ def invoice_finding(finding_id, recipient_email):
         _pp("POST", f"/v2/invoicing/invoices/{inv_id}/send", {"send_to_recipient": True, "send_to_invoicer": True})
         result = {"mode": "invoice", "invoice_id": inv_id, "amount": amt}
     except Exception as e:
-        o = create_order(art["id"], "commercial", 12)
+        o = create_order(art["id"], "commercial", 12, amount=float(amt))
         result = {"mode": "order_link", "order_id": o["order_id"], "pay_url": o["approve_url"], "amount": amt,
                   "note": f"Invoicing API failed ({str(e)[:160]}); created a payment link instead."}
     with db() as c: c.execute("UPDATE findings SET status='INVOICED', invoice=? WHERE id=?", (json.dumps(result), finding_id))

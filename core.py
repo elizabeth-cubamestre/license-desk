@@ -37,6 +37,18 @@ def init():
         if not c.execute("SELECT 1 FROM artworks").fetchone():
             c.executemany("INSERT INTO artworks(id,title,artist,description,base_price,min_price) VALUES(?,?,?,?,?,?)", SEED)
 
+    # Optional demo images: put art-001.jpg, art-002.jpg, art-003.jpg in demo/seed/ so a fresh deploy has real artwork
+    seed_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "demo", "seed")
+    for aid, *_ in SEED:
+        for ext in ("jpg", "jpeg", "png", "webp"):
+            f = os.path.join(seed_dir, f"{aid}.{ext}")
+            if not os.path.exists(f): continue
+            with db() as c: has = c.execute("SELECT 1 FROM refs WHERE artwork_id=?", (aid,)).fetchone()
+            if not has:
+                data = open(f, "rb").read()
+                save_reference(aid, "image/" + ("jpeg" if ext in ("jpg", "jpeg") else ext), data)
+                with db() as c: c.execute("UPDATE artworks SET phash=? WHERE id=?", (dhash(data), aid))
+
 def list_artworks(query=""):
     q = f"%{query.lower()}%"
     with db() as c:

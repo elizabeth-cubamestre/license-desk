@@ -2,7 +2,7 @@ fastapi
 uvicorn[standard]
 httpx
 openai
-mcp
+mcp<2
 python-dotenv
 python-multipart
 Pillow

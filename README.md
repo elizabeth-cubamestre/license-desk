@@ -1,33 +1,61 @@
 # License Desk
 
-Licensing for artists in the age of AI. Artists list work with terms; AI agents discover it over **MCP**, describe their intended use in plain language, get an exact price, pay through **PayPal**, and receive a signed license receipt.
+**Agent-ready licensing for artists, paid through PayPal.**
 
-## How it works
-1. **Discover**: agent calls `search_licenses` (MCP) or `GET /artworks`.
-2. **Quote**: a licensing agent (any OpenAI-compatible LLM) maps intent to a license tier and duration. Prices are computed by code, never by the LLM.
-3. **Pay**: `POST /orders` creates a PayPal Orders v2 order (idempotent, price recomputed server-side). The human buyer approves in PayPal.
-4. **Receipt**: after capture, an HMAC-signed license receipt is issued and can be verified by anyone.
+AI is using artists' work without asking, and watermarks and scraping defences keep getting beaten. License Desk takes a different approach: make it easy to *pay*. An artist uploads work and sets terms once. Buyers, and AI agents, describe how they want to use it in plain language, get an exact price, pay through PayPal, and receive a signed, verifiable license. When someone skips that step, the artist can find the copy and invoice for a retroactive license instead of just sending a takedown.
 
-## Setup (about 10 minutes)
-1. `python -m venv .venv && source .venv/bin/activate` (Windows: `.venv\Scripts\activate`), then `pip install -r requirements.txt`
-2. Go to developer.paypal.com, log in, open **Apps & Credentials**, switch to **Sandbox**, create an app. Copy Client ID and Secret.
-3. Under **Testing Tools > Sandbox Accounts** you get a Business and a Personal account. The Personal one is your test buyer.
-4. `cp .env.example .env` and fill in the PayPal keys and `RECEIPT_SECRET`. For the LLM, create a free key at aistudio.google.com and set `LLM_API_KEY` (or leave empty for the keyword fallback).
-5. Run the API: `uvicorn api:app --reload` and open http://localhost:8000/docs
-6. In another terminal run the buyer agent:
-   `python demo/buyer_agent.py "Use in a 6 month regional ad campaign" --budget 40`
-   Log in with the sandbox **Personal** account when the browser opens. The agent finishes the purchase and prints the verified license.
+## Features
+- **Artist storefront:** upload a work, set a starting price and a floor, and decide whether AI-training use is allowed.
+- **AI licensing agent:** turns "a 6 month regional ad campaign" into a license tier and duration. The LLM never sets prices. Code computes them and the server recomputes at checkout.
+- **PayPal checkout:** Orders v2 create and capture with idempotency keys. Server-side pricing.
+- **Signed licenses:** HMAC-signed receipts that anyone can verify through `/receipts/verify` or the MCP tool.
+- **MCP server for agents:** five tools (`search_licenses`, `get_quote`, `purchase_license`, `complete_purchase`, `verify_receipt`).
+- **Budget-capped buyer agent:** a live LLM agent buys a license end to end. Budget and artist rules are enforced in code, so the model cannot overspend or override them.
+- **Sentinel:** searches the web (Tavily) for copies, compares them to the original with perceptual hashing (resizes, recompression, mirroring, light edits), produces a report, and sends a PayPal invoice for a retroactive license. Artists can also upload a suspect image directly.
+- **Earnings dashboard** built with AG Grid.
 
-### MCP
-`python mcp_server.py` runs the MCP server over stdio. Point any MCP client at that command.
+## PayPal APIs used
+Orders v2 (create, get, capture), Invoicing v2 (create, send; falls back to an order link if Invoicing is not enabled), OAuth2 client credentials. Sandbox only.
 
-## Roadmap
-Sentinel (web detection with Tavily + vision model, converting confirmed copies into retroactive license invoices), PayPal webhooks, AG Grid artist dashboard, OpenAPI-generated SDK.
+## AI tools used
+- Any OpenAI-compatible LLM for the licensing agent and the buyer agent (tested with Gemini and Groq).
+- Model Context Protocol (MCP) Python SDK for agent tools.
+- Tavily Search API for finding suspected copies.
+- AG Grid Community for the dashboard.
+
+## Quickstart (about 10 minutes)
+Requires Python 3.10+.
+```bash
+python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env                                   # then fill in the keys below
+uvicorn api:app --reload
+```
+Open http://localhost:8000.
+
+**Keys you need**
+1. PayPal sandbox app: developer.paypal.com, Apps & Credentials, Sandbox. Put the Client ID and Secret in `.env`. Optionally tick **Invoicing** in the app's features.
+2. An LLM key (optional; without one, quotes use a keyword fallback). Examples: Groq (`LLM_BASE_URL=https://api.groq.com/openai/v1`) or Google AI Studio.
+3. Tavily key (only for the web scan; the suspect-image check works without it).
+
+**Sandbox buyer for testing payments:** use any Personal account from Testing Tools > Sandbox Accounts in the PayPal developer dashboard. Judges: a ready-to-use buyer login is provided in the submission notes.
+
+## Try it
+1. **Sell my art:** upload an image.
+2. **License art:** choose it, type "6 month regional ad campaign", pay with the sandbox buyer. A signed license appears.
+3. **Protect my art:** upload a resized or mirrored copy under "check a suspect image". It is flagged, with a report and an invoice option.
+4. **Earnings:** the sale appears in the grid.
+
+**Live agent demo** (second terminal, with the server running):
+```bash
+python demo/agent.py "I need a cat character for a coffee shop ad, 6 months, regional" --budget 80
+python demo/agent.py "Same task" --budget 10          # budget guard blocks the purchase
+```
+
+## Limits (honest)
+Sentinel detects reposts, resizes, mirrored and lightly edited copies. It does not detect redrawn work or style imitation, and style alone is generally not infringement. Findings are leads for a human to verify, not legal conclusions. Payments are sandbox only.
+
+## Layout
+`core.py` logic, `api.py` HTTP API and static site, `mcp_server.py` MCP tools, `static/` UI, `demo/` agents and seed images.
 
 License: MIT
-
-## Sentinel (detect, then monetize)
-1. Upload a reference image: `curl -F image=@art.png localhost:8000/artworks/art-001/image`
-2. Scan: `curl -X POST localhost:8000/sentinel/scan -H 'content-type: application/json' -d '{"artwork_id":"art-001"}'`
-   Uses Tavily (cached, capped by `MAX_SEARCHES_PER_SCAN`) and a vision model to verify matches. Style imitation is never flagged as copying.
-3. Invoice a confirmed copy: `curl -X POST localhost:8000/findings/1/invoice -H 'content-type: application/json' -d '{"recipient_email":"<sandbox personal email>"}'`

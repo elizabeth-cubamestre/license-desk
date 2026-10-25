@@ -30,7 +30,7 @@ def chat(msgs, tools):
 
 async def main():
     params = StdioServerParameters(command=sys.executable, args=[str(ROOT / "mcp_server.py")], env=dict(os.environ), cwd=str(ROOT))
-    async with stdio_client(params) as (r, w), ClientSession(r, w) as s:
+    async with stdio_client(params, errlog=open(os.devnull, "w")) as (r, w), ClientSession(r, w) as s:
         await s.initialize()
         tools = [{"type": "function", "function": {"name": t.name, "description": t.description or "", "parameters": t.inputSchema}}
                  for t in (await s.list_tools()).tools]

@@ -43,7 +43,7 @@ def init():
         for ext in ("jpg", "jpeg", "png", "webp"):
             f = os.path.join(seed_dir, f"{aid}.{ext}")
             if not os.path.exists(f): continue
-            with db() as c: has = c.execute("SELECT 1 FROM refs WHERE artwork_id=?", (aid,)).fetchone()
+            with db() as c: has = c.execute("SELECT 1 FROM refs WHERE artwork_id=? OR NOT EXISTS (SELECT 1 FROM artworks WHERE id=?)", (aid, aid)).fetchone()
             if not has:
                 data = open(f, "rb").read()
                 save_reference(aid, "image/" + ("jpeg" if ext in ("jpg", "jpeg") else ext), data)
@@ -224,32 +224,58 @@ def list_licenses():
                             JOIN artworks a ON a.id=o.artwork_id WHERE o.status='COMPLETED' ORDER BY o.created DESC""").fetchall()
     return [dict(r) for r in rows]
 
+def _fetch_image(url):
+    from urllib.parse import urlparse
+    u = urlparse(url)
+    r = httpx.get(url, timeout=25, follow_redirects=True, headers={
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+        "Accept": "image/avif,image/webp,image/*,*/*;q=0.8", "Referer": f"{u.scheme}://{u.netloc}/"})
+    if r.status_code != 200: raise ValueError(f"HTTP {r.status_code}, the site blocks downloads")
+    if len(r.content) > 40_000_000: raise ValueError("file too large")
+    return r.content
+
+def _lens(artwork_id):
+    """True reverse image search (Google Lens via SerpApi). Needs a public URL for our image, so it works once deployed."""
+    key, base = os.environ.get("SERPAPI_KEY"), os.environ.get("PUBLIC_URL", "")
+    if not key or not base or "localhost" in base or "127.0.0.1" in base: return None
+    ck = f"lens:{artwork_id}"
+    with db() as c: hit = c.execute("SELECT v FROM cache WHERE k=?", (ck,)).fetchone()
+    if hit: return [tuple(x) for x in json.loads(hit["v"])]
+    r = httpx.get("https://serpapi.com/search.json", timeout=90,
+                  params={"engine": "google_lens", "url": f"{base}/artworks/{artwork_id}/image", "api_key": key})
+    r.raise_for_status()
+    out = [(m.get("thumbnail") or m.get("image"), m.get("link", "")) for m in r.json().get("visual_matches", [])[:25]
+           if m.get("thumbnail") or m.get("image")]
+    with db() as c: c.execute("INSERT OR REPLACE INTO cache VALUES(?,?)", (ck, json.dumps(out)))
+    return out
+
 def scan(artwork_id):
     art = get_artwork(artwork_id)
     with db() as c: ref = c.execute("SELECT * FROM refs WHERE artwork_id=?", (artwork_id,)).fetchone()
     if not ref: raise ValueError("This artwork has no image to compare against.")
     h = art.get("phash") or dhash(ref["data"]); hf = dhash(ref["data"], True)
-    queries = [f"{art['title']} {art['artist']}", f"{art['title']} art", art["description"]]
-    queries = [q for q in queries if q.strip()][: int(os.environ.get("MAX_SEARCHES_PER_SCAN", "5"))]
-    seen, cands = set(), []
-    for q in queries:
-        t = _tavily(q)
-        for u in t["images"]:
-            if u and u not in seen: seen.add(u); cands.append((u, t["page"]))
+    cands, mode, queries = None, "reverse image search", []
+    try: cands = _lens(artwork_id)
+    except Exception: cands = None
+    if not cands:
+        mode = "keyword web search"
+        queries = [q for q in [f"{art['title']} {art['artist']}", f"{art['title']} art", art["description"]] if q.strip()]
+        queries = queries[: int(os.environ.get("MAX_SEARCHES_PER_SCAN", "5"))]
+        seen, cands = set(), []
+        for q in queries:
+            t = _tavily(q)
+            for u in t["images"]:
+                if u and u not in seen: seen.add(u); cands.append((u, t["page"]))
     cands = cands[: int(os.environ.get("MAX_IMAGES", "12"))]
     def one(c):
         try:
-            r = httpx.get(c[0], timeout=15, follow_redirects=True, headers={"User-Agent": "LicenseDesk-Sentinel"})
-            if r.status_code != 200 or not r.headers.get("content-type", "").startswith("image/") or len(r.content) > 6_000_000:
-                return (c, None)
-            dh = dhash(r.content); d = min(hamming(h, dh), hamming(hf, dh)); sc = _score(d)
-            v = _verdict(d)
-            return (c, {"verdict": v, "score": sc, "evidence": f"Perceptual-hash distance {d}/64 (0 = identical, about 32 = unrelated)."})
-        except Exception as e: return (c, {"verdict": "error", "score": 0, "evidence": f"{type(e).__name__}: {str(e)[:100]}"})
+            dh = dhash(_fetch_image(c[0])); d = min(hamming(h, dh), hamming(hf, dh)); sc = _score(d)
+            return (c, {"verdict": _verdict(d), "score": sc, "evidence": f"Perceptual-hash distance {d}/64 (0 = identical, about 32 = unrelated)."})
+        except Exception as e:
+            return (c, {"verdict": "skipped", "score": 0, "evidence": f"Could not analyze: {str(e)[:90]}"})
     with ThreadPoolExecutor(4) as ex: results = list(ex.map(one, cands))
     found, checked = [], []
     for (url, page), j in results:
-        j = j or {"verdict": "skipped", "score": 0, "evidence": "Not a downloadable image."}
         row = {"image_url": url, "source_hint": page, **j}
         if j["verdict"] in ("exact_copy", "derivative"):
             with db() as c:
@@ -259,7 +285,7 @@ def scan(artwork_id):
                     (artwork_id, url, page, j["verdict"], j["score"], j["evidence"], time.time())).lastrowid
             row["id"] = fid; found.append(row)
         checked.append(row)
-    return {"queries_used": len(queries), "images_checked": len(cands), "matches": found, "checked": checked}
+    return {"mode": mode, "queries_used": len(queries), "images_checked": len(cands), "matches": found, "checked": checked}
 
 def check_image(artwork_id, mime, data):
     """Artist uploads a suspect image; same matching as the web scan."""

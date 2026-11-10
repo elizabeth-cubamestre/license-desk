@@ -5,7 +5,7 @@
 > **Live demo:** https://license-desk-81yg.onrender.com
 > (Free hosting sleeps when idle, so the first load can take about a minute. Everything runs in the **PayPal sandbox**, so no real money moves.)
 >
-> **Demo video:** [ADD YOUTUBE LINK]
+> **Demo video:** [https://www.youtube.com/watch?v=bVxh9t5s7PY]
 
 Artists say their work trained AI models without permission, and invisible protection filters have been shown to be removable. License Desk takes a different approach: make it easy to pay. An artist uploads work and sets terms once. Buyers, and AI agents, describe how they want to use it in plain language, get an exact price, pay through PayPal, and receive a signed, verifiable license. When someone skips that step, the artist can find the copy and invoice for a retroactive license instead of only sending a takedown.
 
